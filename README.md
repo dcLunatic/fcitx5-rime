@@ -12,21 +12,12 @@
 ![](assets/1.gif)
 
 ## 快速开始
-> 要求对应的fcitx5版本为5.0.19，其他版本可能出现在前后不兼容问题（不过可以试试看）
+> 要求对应的fcitx5版本为5.1.8
 ```sh
 git clone https://github.com/dcLunatic/fcitx5-rime.git
-cd fcitx5-rime/quickStart
-sudo sh quickInstall.sh
+# Wait for an update to arrive
 ```
 
 ## 说明
 关于application preedit的显示，以global的为准，rime的只做拼音/中文的切换。
 效果图对应的配置是，global preedit开启，rime preedit不开启。
-
-## VersionInfo
-- fcitx5: 5.0.19
-- fcitx5-rime: 5.0.14-1
-- cmake: 3.23.2
-- make: GNU Make 4.3
-- gcc: 12.1.0
-- other...
