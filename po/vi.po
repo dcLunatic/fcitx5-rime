@@ -9,61 +9,93 @@ msgid ""
 msgstr ""
 "Project-Id-Version: fcitx5-rime\n"
 "Report-Msgid-Bugs-To: fcitx-dev@googlegroups.com\n"
-"POT-Creation-Date: 2022-04-13 20:24+0000\n"
+"POT-Creation-Date: 2023-12-03 20:24+0000\n"
 "PO-Revision-Date: 2017-11-23 05:02+0000\n"
 "Last-Translator: csslayer <wengxt@gmail.com>, 2017\n"
-"Language-Team: Vietnamese (https://www.transifex.com/fcitx/teams/12005/vi/)\n"
+"Language-Team: Vietnamese (https://app.transifex.com/fcitx/teams/12005/vi/)\n"
 "Language: vi\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
 
-#: src/rimeengine.h:42
+#: src/rimeengine.h:44
+msgid "All"
+msgstr ""
+
+#: src/rimeengine.h:64
 msgid "Commit current text when deactivating"
 msgstr ""
 
-#: src/rimeengine.cpp:115
+#: src/rimeengine.h:50
+msgid "Commit preview"
+msgstr ""
+
+#: src/rimeengine.h:50
+msgid "Composing text"
+msgstr ""
+
+#: src/rimeengine.cpp:314
 msgid "Deploy"
 msgstr "Triển khai"
 
-#: src/rimeengine.h:39
+#: src/rimeengine.h:49
+msgid "Do not show"
+msgstr ""
+
+#: src/rimeengine.h:61
 msgid "Fix embedded preedit cursor at the beginning of the preedit"
 msgstr ""
 
-#: src/rimeengine.cpp:363
+#: src/rimeengine.h:44
+msgid "Follow Global Configuration"
+msgstr ""
+
+#: src/rimeengine.cpp:676
 msgid "Full Shape is enabled."
 msgstr ""
 
-#: src/rimeengine.cpp:365
-msgid "Full width punctuation is enabled."
-msgstr ""
-
-#: src/rimeengine.cpp:361
+#: src/rimeengine.cpp:673
 msgid "Half Shape is enabled."
 msgstr ""
 
-#: src/rimeengine.cpp:367
-msgid "Half width punctuation is enabled."
-msgstr ""
-
-#: src/rimestate.cpp:55 src/rimeengine.cpp:451
+#: src/rimestate.cpp:67 src/rimeengine.cpp:822
 msgid "Latin Mode"
 msgstr ""
 
-#: src/rimeengine.h:55
+#: src/rimeengine.h:77
 msgid "Load available plugins automatically"
 msgstr ""
 
-#: src/rimeengine.h:59
+#: src/rimeengine.h:81
 msgid "Modules"
 msgstr ""
 
-#: src/rimeengine.h:57
+#: src/rimeengine.h:45
+msgid "No"
+msgstr ""
+
+#: src/rimeengine.h:79
 msgid "Plugins"
 msgstr ""
 
-#: src/rimeengine.cpp:378 src/rime.conf.in:3 src/rime-addon.conf.in.in:3
+#: src/rimeengine.h:55
+msgid "Preedit Mode"
+msgstr ""
+
+#: src/rimeengine.h:45
+msgid "Program"
+msgstr ""
+
+#: src/rimeengine.cpp:682
+msgid "Punctuation conversion is disabled."
+msgstr ""
+
+#: src/rimeengine.cpp:679
+msgid "Punctuation conversion is enabled."
+msgstr ""
+
+#: src/rimeengine.cpp:702 src/rime.conf.in:3 src/rime-addon.conf.in.in:3
 msgid "Rime"
 msgstr "Rime"
 
@@ -75,40 +107,40 @@ msgstr "Bộ Wrapper cho Fcitx"
 msgid "Rime for Fcitx 5"
 msgstr ""
 
-#: src/rimeengine.cpp:355
-msgid "Rime has encountered an error. See /tmp/rime.fcitx.ERROR for details."
-msgstr "Rime gặp lỗi. Xem ở /tmp/rime.fcitx.ERROR để biết chi tiết."
+#: src/rimeengine.cpp:664
+msgid "Rime has encountered an error. See log for details."
+msgstr ""
 
 #: org.fcitx.Fcitx5.Addon.Rime.metainfo.xml.in:8
 msgid "Rime input method"
 msgstr ""
 
-#: src/rimeengine.cpp:352
+#: src/rimeengine.cpp:656
 msgid "Rime is ready."
 msgstr "Rime sẵn sàng,"
 
-#: src/rimeengine.cpp:349
+#: src/rimeengine.cpp:653
 msgid ""
 "Rime is under maintenance. It may take a few seconds. Please wait until it "
 "is finished..."
 msgstr ""
 
-#: src/rimeengine.h:35
-msgid "Show preedit within application"
+#: src/rimeengine.h:58
+msgid "Shared Input State"
 msgstr ""
 
-#: src/rimeengine.cpp:371
+#: src/rimeengine.cpp:688
 msgid "Simplified Chinese is enabled."
 msgstr ""
 
-#: src/rimeengine.cpp:127
+#: src/rimeengine.cpp:326
 msgid "Synchronize"
 msgstr "Đồng bộ hóa"
 
-#: src/rimeengine.cpp:369
+#: src/rimeengine.cpp:685
 msgid "Traditional Chinese is enabled."
 msgstr ""
 
-#: src/rimeengine.h:44
+#: src/rimeengine.h:66
 msgid "User data dir"
 msgstr ""

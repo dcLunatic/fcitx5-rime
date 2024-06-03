@@ -3,13 +3,13 @@ Name=Rime
 Comment=Rime Wrapper For Fcitx
 Category=InputMethod
 Version=@PROJECT_VERSION@
-Library=export:rime
+Library=export:librime
 Type=SharedLibrary
 OnDemand=True
 Configurable=True
 
 [Addon/Dependencies]
-0=core:5.0.6
+0=core:5.1.0
 
 [Addon/OptionalDependencies]
 0=notifications

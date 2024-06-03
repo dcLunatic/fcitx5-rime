@@ -7,19 +7,28 @@
 #include "rimeengine.h"
 #include "notifications_public.h"
 #include "rimestate.h"
+#include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <dirent.h>
 #include <fcitx-utils/event.h>
 #include <fcitx-utils/fs.h>
 #include <fcitx-utils/i18n.h>
 #include <fcitx-utils/log.h>
+#include <fcitx-utils/misc.h>
 #include <fcitx-utils/standardpath.h>
+#include <fcitx-utils/stringutils.h>
 #include <fcitx/candidatelist.h>
 #include <fcitx/inputcontext.h>
 #include <fcitx/inputcontextmanager.h>
 #include <fcitx/inputpanel.h>
+#include <fcitx/statusarea.h>
+#include <fcitx/userinterface.h>
 #include <fcitx/userinterfacemanager.h>
+#include <optional>
 #include <rime_api.h>
+#include <stdexcept>
+#include <string>
 
 FCITX_DEFINE_LOG_CATEGORY(rime, "rime");
 
@@ -33,21 +42,59 @@ parseAppOptions(rime_api_t *api, RimeConfig *config) {
         appOptions;
     RimeConfigIterator appIter;
     RimeConfigIterator optionIter;
-    api->config_begin_map(&appIter, config, "app_options");
-    while (api->config_next(&appIter)) {
-        auto &options = appOptions[appIter.key];
-        api->config_begin_map(&optionIter, config, appIter.path);
-        while (api->config_next(&optionIter)) {
-            Bool value = False;
-            if (api->config_get_bool(config, optionIter.path, &value)) {
-                options[optionIter.key] = !!value;
+    if (api->config_begin_map(&appIter, config, "app_options")) {
+        while (api->config_next(&appIter)) {
+            auto &options = appOptions[appIter.key];
+            if (api->config_begin_map(&optionIter, config, appIter.path)) {
+                while (api->config_next(&optionIter)) {
+                    Bool value = False;
+                    if (api->config_get_bool(config, optionIter.path, &value)) {
+                        options[optionIter.key] = !!value;
+                    }
+                }
+                api->config_end(&optionIter);
             }
         }
-        api->config_end(&optionIter);
+        api->config_end(&appIter);
     }
-    api->config_end(&appIter);
     return appOptions;
 }
+
+std::vector<std::string> getListItemPath(rime_api_t *api, RimeConfig *config,
+                                         const std::string &path) {
+    std::vector<std::string> paths;
+    RimeConfigIterator iter;
+    if (api->config_begin_list(&iter, config, path.c_str())) {
+        while (api->config_next(&iter)) {
+            paths.push_back(iter.path);
+        }
+        api->config_end(&iter);
+    }
+    return paths;
+}
+
+std::vector<std::string> getListItemString(rime_api_t *api, RimeConfig *config,
+                                           const std::string &path) {
+    std::vector<std::string> values;
+    auto paths = getListItemPath(api, config, path);
+    for (const auto &path : paths) {
+        const auto *value = api->config_get_cstring(config, path.c_str());
+        if (!value) {
+            return {};
+        }
+        values.emplace_back(value);
+    }
+    return values;
+}
+
+rime_api_t *EnsureRimeApi() {
+    auto *api = rime_get_api();
+    if (!api) {
+        throw std::runtime_error("Failed to get Rime API");
+    }
+    return api;
+}
+
 } // namespace
 
 class IMAction : public Action {
@@ -55,20 +102,21 @@ public:
     IMAction(RimeEngine *engine) : engine_(engine) {}
 
     std::string shortText(InputContext *ic) const override {
-        auto state = engine_->state(ic);
-        RIME_STRUCT(RimeStatus, status);
         std::string result;
-        if (state->getStatus(&status)) {
-            if (status.is_disabled) {
-                result = "\xe2\x8c\x9b";
-            } else if (status.is_ascii_mode) {
-                result = "A";
-            } else if (status.schema_name && status.schema_name[0] != '.') {
-                result = status.schema_name;
-            } else {
-                result = "中";
-            }
-            engine_->api()->free_status(&status);
+        auto *state = engine_->state(ic);
+        if (state) {
+            state->getStatus([&result](const RimeStatus &status) {
+                result = status.schema_id ? status.schema_id : "";
+                if (status.is_disabled) {
+                    result = "\xe2\x8c\x9b";
+                } else if (status.is_ascii_mode) {
+                    result = "A";
+                } else if (status.schema_name && status.schema_name[0] != '.') {
+                    result = status.schema_name;
+                } else {
+                    result = "中";
+                }
+            });
         } else {
             result = "\xe2\x8c\x9b";
         }
@@ -76,103 +124,283 @@ public:
     }
 
     std::string longText(InputContext *ic) const override {
-        auto state = engine_->state(ic);
         std::string result;
-        RIME_STRUCT(RimeStatus, status);
-        if (state->getStatus(&status)) {
-            if (status.schema_name) {
-                result = status.schema_name;
-            }
-            engine_->api()->free_status(&status);
+        auto *state = engine_->state(ic);
+        if (state) {
+            state->getStatus([&result](const RimeStatus &status) {
+                result = status.schema_name ? status.schema_name : "";
+            });
         }
         return result;
     }
 
     std::string icon(InputContext *ic) const override {
-        auto state = engine_->state(ic);
-        RIME_STRUCT(RimeStatus, status);
-        if (state->getStatus(&status)) {
-            if (status.is_disabled) {
-                return "fcitx-rime-disabled";
-            }
+        bool isDisabled = false;
+        auto *state = engine_->state(ic);
+        if (state) {
+            state->getStatus([&isDisabled](const RimeStatus &status) {
+                isDisabled = status.is_disabled;
+            });
         }
-        return "fcitx-rime-im";
+        if (isDisabled) {
+            return "fcitx_rime_disabled";
+        }
+        return "fcitx_rime_im";
     }
 
 private:
     RimeEngine *engine_;
 };
 
+class ToggleAction : public RimeOptionAction {
+public:
+    ToggleAction(RimeEngine *engine, std::string_view schema,
+                 std::string_view option, std::string disabledText,
+                 std::string enabledText)
+        : engine_(engine), option_(option),
+          disabledText_(std::move(disabledText)),
+          enabledText_(std::move(enabledText)) {
+        engine_->instance()->userInterfaceManager().registerAction(
+            stringutils::concat("fcitx-rime-", schema, "-", option), this);
+    }
+
+    void activate(InputContext *ic) override {
+        auto *state = engine_->state(ic);
+        auto *api = engine_->api();
+        if (!state) {
+            return;
+        }
+        // Do not send notification since user is explicitly select it.
+        engine_->blockNotificationFor(30000);
+        auto session = state->session();
+        Bool oldValue = api->get_option(session, option_.c_str());
+        api->set_option(session, option_.c_str(), !oldValue);
+    }
+
+    std::string shortText(InputContext *ic) const override {
+        auto *state = engine_->state(ic);
+        auto *api = engine_->api();
+        if (!state) {
+            return "";
+        }
+        auto session = state->session();
+        if (api->get_option(session, option_.c_str())) {
+            return stringutils::concat(enabledText_, " → ", disabledText_);
+        }
+        return stringutils::concat(disabledText_, " → ", enabledText_);
+    }
+
+    std::string icon(InputContext * /*unused*/) const override { return ""; }
+
+    std::optional<std::string> snapshotOption(InputContext *ic) override {
+        auto *state = engine_->state(ic);
+        auto *api = engine_->api();
+        if (!state) {
+            return std::nullopt;
+        }
+        auto session = state->session(false);
+        if (!session) {
+            return std::nullopt;
+        }
+        if (!api->get_option(session, option_.c_str())) {
+            return stringutils::concat("!", option_);
+        }
+        return option_;
+    }
+
+private:
+    RimeEngine *engine_;
+    std::string option_;
+    std::string disabledText_;
+    std::string enabledText_;
+};
+
+class SelectAction : public RimeOptionAction {
+public:
+    SelectAction(RimeEngine *engine, std::string_view schema,
+                 std::vector<std::string> options,
+                 std::vector<std::string> texts)
+        : engine_(engine), options_(options), texts_(std::move(texts)) {
+        for (size_t i = 0; i < options.size(); ++i) {
+            actions_.emplace_back();
+            actions_.back().setShortText(texts_[i]);
+            actions_.back().connect<SimpleAction::Activated>(
+                [this, i](InputContext *ic) {
+                    auto *state = engine_->state(ic);
+                    auto *api = engine_->api();
+                    if (!state) {
+                        return;
+                    }
+                    auto session = state->session();
+                    for (size_t j = 0; j < options_.size(); ++j) {
+                        api->set_option(session, options_[j].c_str(), i == j);
+                    }
+                });
+            engine_->instance()->userInterfaceManager().registerAction(
+                stringutils::concat("fcitx-rime-", schema, "-", options_[i]),
+                &actions_.back());
+            menu_.addAction(&actions_.back());
+        }
+        setMenu(&menu_);
+        engine_->instance()->userInterfaceManager().registerAction(
+            stringutils::concat("fcitx-rime-", schema, "-select-", options[0]),
+            this);
+    }
+
+    std::string shortText(InputContext *ic) const override {
+        auto *state = engine_->state(ic);
+        auto *api = engine_->api();
+        if (!state) {
+            return "";
+        }
+        auto session = state->session();
+        for (size_t i = 0; i < options_.size(); ++i) {
+            if (api->get_option(session, options_[i].c_str())) {
+                return texts_[i];
+            }
+        }
+        return "";
+    }
+
+    std::string icon(InputContext * /*unused*/) const override { return ""; }
+
+    std::optional<std::string> snapshotOption(InputContext *ic) override {
+        auto *state = engine_->state(ic);
+        auto *api = engine_->api();
+        if (!state) {
+            return std::nullopt;
+        }
+        auto session = state->session(false);
+        if (!session) {
+            return std::nullopt;
+        }
+        for (size_t i = 0; i < options_.size(); ++i) {
+            if (api->get_option(session, options_[i].c_str())) {
+                return options_[i];
+            }
+        }
+        return std::nullopt;
+    }
+
+private:
+    RimeEngine *engine_;
+    std::vector<std::string> options_;
+    std::vector<std::string> texts_;
+    std::list<SimpleAction> actions_;
+    Menu menu_;
+};
+
+bool RimeEngine::firstRun_ = true;
+
 RimeEngine::RimeEngine(Instance *instance)
-    : instance_(instance), api_(rime_get_api()),
-      factory_([this](InputContext &ic) { return new RimeState(this, ic); }) {
+    : instance_(instance), api_(EnsureRimeApi()),
+      factory_([this](InputContext &ic) { return new RimeState(this, ic); }),
+      sessionPool_(this, getSharedStatePolicy()) {
+    if constexpr (isAndroid() || isApple()) {
+        const auto &sp = fcitx::StandardPath::global();
+        std::string defaultYaml = sp.locate(fcitx::StandardPath::Type::Data,
+                                            "rime-data/default.yaml");
+        if (defaultYaml.empty()) {
+            throw std::runtime_error("Fail to locate shared data directory");
+        }
+        sharedDataDir_ = fcitx::fs::dirName(defaultYaml);
+    } else {
+        sharedDataDir_ = RIME_DATA_DIR;
+    }
     imAction_ = std::make_unique<IMAction>(this);
     instance_->userInterfaceManager().registerAction("fcitx-rime-im",
                                                      imAction_.get());
     imAction_->setMenu(&schemaMenu_);
     eventDispatcher_.attach(&instance_->eventLoop());
-    deployAction_.setIcon("fcitx-rime-deploy");
+    separatorAction_.setSeparator(true);
+    instance_->userInterfaceManager().registerAction("fcitx-rime-separator",
+                                                     &separatorAction_);
+    deployAction_.setIcon("fcitx_rime_deploy");
     deployAction_.setShortText(_("Deploy"));
     deployAction_.connect<SimpleAction::Activated>([this](InputContext *ic) {
         deploy();
-        auto state = this->state(ic);
-        if (ic->hasFocus()) {
+        auto *state = this->state(ic);
+        if (state && ic->hasFocus()) {
             state->updateUI(ic, false);
         }
     });
     instance_->userInterfaceManager().registerAction("fcitx-rime-deploy",
                                                      &deployAction_);
 
-    syncAction_.setIcon("fcitx-rime-sync");
+    syncAction_.setIcon("fcitx_rime_sync");
     syncAction_.setShortText(_("Synchronize"));
 
     syncAction_.connect<SimpleAction::Activated>([this](InputContext *ic) {
         sync();
-        auto state = this->state(ic);
-        if (ic->hasFocus()) {
+        auto *state = this->state(ic);
+        if (state && ic->hasFocus()) {
             state->updateUI(ic, false);
         }
     });
     instance_->userInterfaceManager().registerAction("fcitx-rime-sync",
                                                      &syncAction_);
+    schemaMenu_.addAction(&separatorAction_);
+    schemaMenu_.addAction(&deployAction_);
+    schemaMenu_.addAction(&syncAction_);
+    globalConfigReloadHandle_ = instance_->watchEvent(
+        EventType::GlobalConfigReloaded, EventWatcherPhase::Default,
+        [this](Event &) { refreshSessionPoolPolicy(); });
     reloadConfig();
+    constructed_ = true;
 }
 
 RimeEngine::~RimeEngine() {
     factory_.unregister();
     try {
-        if (api_) {
-            api_->finalize();
-        }
+        api_->finalize();
     } catch (const std::exception &e) {
         RIME_ERROR() << e.what();
     }
 }
 
 void RimeEngine::rimeStart(bool fullcheck) {
-    if (!api_) {
-        return;
-    }
-
     RIME_DEBUG() << "Rime Start (fullcheck: " << fullcheck << ")";
 
     auto userDir = stringutils::joinPath(
         StandardPath::global().userDirectory(StandardPath::Type::PkgData),
         "rime");
+    RIME_DEBUG() << "Rime data directory: " << userDir;
     if (!fs::makePath(userDir)) {
         if (!fs::isdir(userDir)) {
             RIME_ERROR() << "Failed to create user directory: " << userDir;
         }
     }
-    const char *sharedDataDir = RIME_DATA_DIR;
 
     RIME_STRUCT(RimeTraits, fcitx_rime_traits);
-    fcitx_rime_traits.shared_data_dir = sharedDataDir;
+    fcitx_rime_traits.shared_data_dir = sharedDataDir_.c_str();
     fcitx_rime_traits.app_name = "rime.fcitx-rime";
     fcitx_rime_traits.user_data_dir = userDir.c_str();
     fcitx_rime_traits.distribution_name = "Rime";
     fcitx_rime_traits.distribution_code_name = "fcitx-rime";
     fcitx_rime_traits.distribution_version = FCITX_RIME_VERSION;
+#ifndef FCITX_RIME_NO_LOG_LEVEL
+    // make librime only log to stderr
+    // https://github.com/rime/librime/commit/6d1b9b65de4e7784a68a17d10a3e5c900e4fd511
+    fcitx_rime_traits.log_dir = "";
+    switch (rime().logLevel()) {
+    case NoLog:
+        fcitx_rime_traits.min_log_level = 4;
+        break;
+    case Fatal:
+        fcitx_rime_traits.min_log_level = 3;
+        break;
+    case Error:
+    case Warn:
+    case Info:
+        fcitx_rime_traits.min_log_level = 2;
+        break;
+    case Debug:
+    default:
+        // Rime info is too noisy.
+        fcitx_rime_traits.min_log_level = 0;
+        break;
+    }
+#endif
 
 #ifdef FCITX_RIME_LOAD_PLUGIN
     std::vector<const char *> modules;
@@ -198,17 +426,24 @@ void RimeEngine::rimeStart(bool fullcheck) {
     }
     api_->initialize(&fcitx_rime_traits);
     api_->set_notification_handler(&rimeNotificationHandler, this);
-    if (api_->start_maintenance(fullcheck)) {
-        api_->deploy_config_file("fcitx5.yaml", "config_version");
-    }
+    api_->start_maintenance(fullcheck);
 
+    if (!api_->is_maintenance_mode()) {
+        updateAppOptions();
+    } else {
+        needRefreshAppOption_ = true;
+    }
+}
+
+void RimeEngine::updateAppOptions() {
     appOptions_.clear();
-    RimeConfig config = {NULL};
+    RimeConfig config = {nullptr};
     if (api_->config_open("fcitx5", &config)) {
         appOptions_ = parseAppOptions(api_, &config);
         api_->config_close(&config);
     }
     RIME_DEBUG() << "App options are " << appOptions_;
+    releaseAllSession();
 }
 
 void RimeEngine::reloadConfig() {
@@ -216,7 +451,8 @@ void RimeEngine::reloadConfig() {
     updateConfig();
 }
 
-void RimeEngine::setSubConfig(const std::string &path, const RawConfig &) {
+void RimeEngine::setSubConfig(const std::string &path,
+                              const RawConfig & /*unused*/) {
     if (path == "deploy") {
         deploy();
     } else if (path == "sync") {
@@ -226,13 +462,13 @@ void RimeEngine::setSubConfig(const std::string &path, const RawConfig &) {
 
 void RimeEngine::updateConfig() {
     RIME_DEBUG() << "Rime UpdateConfig";
-    factory_.unregister();
-    if (api_) {
-        try {
-            api_->finalize();
-        } catch (const std::exception &e) {
-            RIME_ERROR() << e.what();
-        }
+    if (constructed_ && factory_.registered()) {
+        releaseAllSession(true);
+    }
+    try {
+        api_->finalize();
+    } catch (const std::exception &e) {
+        RIME_ERROR() << e.what();
     }
 
 #ifdef FCITX_RIME_LOAD_PLUGIN
@@ -286,45 +522,120 @@ void RimeEngine::updateConfig() {
     rimeStart(false);
     instance_->inputContextManager().registerProperty("rimeState", &factory_);
     updateSchemaMenu();
+    refreshSessionPoolPolicy();
+
+    if (constructed_) {
+        refreshStatusArea(0);
+    }
 }
-void RimeEngine::activate(const InputMethodEntry &, InputContextEvent &event) {
-    event.inputContext()->statusArea().addAction(StatusGroup::InputMethod,
-                                                 imAction_.get());
-    event.inputContext()->statusArea().addAction(StatusGroup::InputMethod,
-                                                 &deployAction_);
-    event.inputContext()->statusArea().addAction(StatusGroup::InputMethod,
-                                                 &syncAction_);
+
+void RimeEngine::refreshStatusArea(InputContext &ic) {
+    // prevent modifying status area owned by other ime
+    // e.g. keyboard-us when typing password
+    if (instance_->inputMethod(&ic) != "rime") {
+        return;
+    }
+    auto &statusArea = ic.statusArea();
+    statusArea.clearGroup(StatusGroup::InputMethod);
+    statusArea.addAction(StatusGroup::InputMethod, imAction_.get());
+
+    auto *rimeState = state(&ic);
+    std::string currentSchema;
+    if (!rimeState) {
+        return;
+    }
+    rimeState->getStatus([&currentSchema](const RimeStatus &status) {
+        currentSchema = status.schema_id ? status.schema_id : "";
+    });
+    if (currentSchema.empty()) {
+        return;
+    }
+
+    if (auto iter = optionActions_.find(currentSchema);
+        iter != optionActions_.end()) {
+        for (const auto &action : iter->second) {
+            statusArea.addAction(StatusGroup::InputMethod, action.get());
+        }
+    }
 }
+
+void RimeEngine::refreshStatusArea(RimeSessionId session) {
+    instance_->inputContextManager().foreachFocused(
+        [this, session](InputContext *ic) {
+            if (auto *state = this->state(ic)) {
+                // After a deployment, param is 0, refresh all
+                if (!session || state->session(false) == session) {
+                    refreshStatusArea(*ic);
+                }
+            }
+            return true;
+        });
+}
+
+void RimeEngine::updateStatusArea(RimeSessionId session) {
+    instance_->inputContextManager().foreachFocused(
+        [this, session](InputContext *ic) {
+            if (instance_->inputMethod(ic) != "rime") {
+                return true;
+            }
+            if (auto *state = this->state(ic)) {
+                // After a deployment, param is 0, refresh all
+                if (!session || state->session(false) == session) {
+                    // Re-read new option values.
+                    ic->updateUserInterface(UserInterfaceComponent::StatusArea);
+                }
+            }
+            return true;
+        });
+}
+
+void RimeEngine::activate(const InputMethodEntry & /*entry*/,
+                          InputContextEvent &event) {
+    auto *ic = event.inputContext();
+    refreshStatusArea(*ic);
+}
+
 void RimeEngine::deactivate(const InputMethodEntry &entry,
                             InputContextEvent &event) {
     if (event.type() == EventType::InputContextSwitchInputMethod &&
         *config_.commitWhenDeactivate) {
-        auto inputContext = event.inputContext();
-        auto state = inputContext->propertyFor(&factory_);
+        auto *inputContext = event.inputContext();
+        auto *state = this->state(inputContext);
         state->commitPreedit(inputContext);
     }
     reset(entry, event);
 }
+
 void RimeEngine::keyEvent(const InputMethodEntry &entry, KeyEvent &event) {
     FCITX_UNUSED(entry);
+    lastKeyEventTime_ = now(CLOCK_MONOTONIC);
     RIME_DEBUG() << "Rime receive key: " << event.rawKey() << " "
                  << event.isRelease();
-    auto inputContext = event.inputContext();
-    auto state = inputContext->propertyFor(&factory_);
+    auto *inputContext = event.inputContext();
+    auto *state = this->state(inputContext);
     state->keyEvent(event);
 }
 
-void RimeEngine::reset(const InputMethodEntry &, InputContextEvent &event) {
-    auto inputContext = event.inputContext();
-
-    auto state = inputContext->propertyFor(&factory_);
+void RimeEngine::reset(const InputMethodEntry & /*entry*/,
+                       InputContextEvent &event) {
+    auto *inputContext = event.inputContext();
+    auto *state = this->state(inputContext);
     state->clear();
+    instance_->resetCompose(inputContext);
     inputContext->inputPanel().reset();
     inputContext->updatePreedit();
     inputContext->updateUserInterface(UserInterfaceComponent::InputPanel);
 }
 
-void RimeEngine::save() {}
+void RimeEngine::blockNotificationFor(uint64_t usec) {
+    blockNotificationBefore_ = now(CLOCK_MONOTONIC) + usec;
+}
+
+void RimeEngine::save() {
+    // Block notification for 5 sec.
+    blockNotificationFor(5000000);
+    sync();
+}
 
 void RimeEngine::rimeNotificationHandler(void *context, RimeSessionId session,
                                          const char *messageType,
@@ -333,124 +644,191 @@ void RimeEngine::rimeNotificationHandler(void *context, RimeSessionId session,
                  << messageValue;
     RimeEngine *that = static_cast<RimeEngine *>(context);
     that->eventDispatcher_.schedule(
-        [that, messageType = std::string(messageType),
+        [that, session, messageType = std::string(messageType),
          messageValue = std::string(messageValue)]() {
-            that->notify(messageType, messageValue);
+            that->notify(session, messageType, messageValue);
         });
 }
 
-void RimeEngine::notify(const std::string &messageType,
+void RimeEngine::notify(RimeSessionId session, const std::string &messageType,
                         const std::string &messageValue) {
     const char *message = nullptr;
     const char *icon = "";
     const char *tipId = "";
+    int timeout = 3000;
     if (messageType == "deploy") {
         tipId = "fcitx-rime-deploy";
-        icon = "fcitx-rime-deploy";
+        icon = "fcitx_rime_deploy";
         if (messageValue == "start") {
             message = _("Rime is under maintenance. It may take a few "
                         "seconds. Please wait until it is finished...");
         } else if (messageValue == "success") {
             message = _("Rime is ready.");
+            if (!api_->is_maintenance_mode()) {
+                if (needRefreshAppOption_) {
+                    api_->deploy_config_file("fcitx5.yaml", "config_version");
+                    updateAppOptions();
+                    needRefreshAppOption_ = false;
+                }
+            }
             updateSchemaMenu();
+            refreshStatusArea(0);
         } else if (messageValue == "failure") {
+            needRefreshAppOption_ = false;
             message = _("Rime has encountered an error. "
-                        "See /tmp/rime.fcitx.ERROR for details.");
+                        "See log for details.");
         }
     } else if (messageType == "option") {
-        icon = "fcitx-rime";
-        if (messageValue == "!full_shape") {
-            tipId = "fcitx-rime-full-shape";
-            message = _("Half Shape is enabled.");
-        } else if (messageValue == "full_shape") {
-            tipId = "fcitx-rime-full-shape";
-            message = _("Full Shape is enabled.");
-        } else if (messageValue == "!ascii_punct") {
-            tipId = "fcitx-rime-ascii-punct";
-            message = _("Full width punctuation is enabled.");
-        } else if (messageValue == "ascii_punct") {
-            tipId = "fcitx-rime-ascii-punct";
-            message = _("Half width punctuation is enabled.");
-        } else if (messageValue == "!simplification") {
-            tipId = "fcitx-rime-simplification";
-            message = _("Traditional Chinese is enabled.");
-        } else if (messageValue == "simplification") {
-            tipId = "fcitx-rime-simplification";
-            message = _("Simplified Chinese is enabled.");
+        // Only show option notification triggered by key event.
+        if (!isAndroid() && lastKeyEventTime_ + 30000 > now(CLOCK_MONOTONIC)) {
+            icon = "fcitx-rime";
+            if (messageValue == "!full_shape") {
+                tipId = "fcitx-rime-full-shape";
+                message = _("Half Shape is enabled.");
+            } else if (messageValue == "full_shape") {
+                tipId = "fcitx-rime-full-shape";
+                message = _("Full Shape is enabled.");
+            } else if (messageValue == "!ascii_punct") {
+                tipId = "fcitx-rime-ascii-punct";
+                message = _("Punctuation conversion is enabled.");
+            } else if (messageValue == "ascii_punct") {
+                tipId = "fcitx-rime-ascii-punct";
+                message = _("Punctuation conversion is disabled.");
+            } else if (messageValue == "!simplification") {
+                tipId = "fcitx-rime-simplification";
+                message = _("Traditional Chinese is enabled.");
+            } else if (messageValue == "simplification") {
+                tipId = "fcitx-rime-simplification";
+                message = _("Simplified Chinese is enabled.");
+            }
         }
+        timeout = 1000;
+        updateStatusArea(session);
+    } else if (messageType == "schema") {
+        // Schema is changed either via status area or shortcut
+        refreshStatusArea(session);
     }
 
-    auto notifications = this->notifications();
-    if (message && notifications) {
-        notifications->call<INotifications::showTip>(tipId, _("Rime"), icon,
-                                                     _("Rime"), message, -1);
+    auto *notifications = this->notifications();
+    if (message && notifications &&
+        now(CLOCK_MONOTONIC) > blockNotificationBefore_) {
+        notifications->call<INotifications::showTip>(
+            tipId, _("Rime"), icon, _("Rime"), message, timeout);
     }
-    timeEvent_ = instance_->eventLoop().addTimeEvent(
-        CLOCK_MONOTONIC, now(CLOCK_MONOTONIC) + 1000000, 0,
-        [this](EventSourceTime *, uint64_t) {
-            if (auto *ic = instance_->lastFocusedInputContext()) {
-                imAction_->update(ic);
-                ic->updateUserInterface(UserInterfaceComponent::StatusArea);
-            }
-            return true;
-        });
 }
 
 RimeState *RimeEngine::state(InputContext *ic) {
+    if (!factory_.registered()) {
+        return nullptr;
+    }
     return ic->propertyFor(&factory_);
 }
 
-std::string RimeEngine::subMode(const InputMethodEntry &, InputContext &ic) {
-    auto rimeState = state(&ic);
-    return rimeState->subMode();
+std::string RimeEngine::subMode(const InputMethodEntry & /*entry*/,
+                                InputContext &ic) {
+    if (auto *rimeState = state(&ic)) {
+        return rimeState->subMode();
+    }
+    return "";
 }
 
-std::string RimeEngine::subModeLabelImpl(const InputMethodEntry &,
+std::string RimeEngine::subModeLabelImpl(const InputMethodEntry & /*unused*/,
                                          InputContext &ic) {
-    auto rimeState = state(&ic);
-    return rimeState->subModeLabel();
+    if (auto *rimeState = state(&ic)) {
+        return rimeState->subModeLabel();
+    }
+    return "";
 }
 
-std::string RimeEngine::subModeIconImpl(const InputMethodEntry &,
+std::string RimeEngine::subModeIconImpl(const InputMethodEntry & /*unused*/,
                                         InputContext &ic) {
     std::string result = "fcitx-rime";
-    if (!api_ || !factory_.registered()) {
+    if (!factory_.registered()) {
         return result;
     }
-    auto state = this->state(&ic);
-    RIME_STRUCT(RimeStatus, status);
-    if (state->getStatus(&status)) {
-        if (status.is_disabled) {
-            result = "fcitx-rime-disable";
-        } else if (status.is_ascii_mode) {
-            result = "fcitx-rime-latin";
-        } else {
-            result = "fcitx-rime";
-        }
-        api_->free_status(&status);
+    auto *state = this->state(&ic);
+    if (state) {
+        state->getStatus([&result](const RimeStatus &status) {
+            if (status.is_disabled) {
+                result = "fcitx_rime_disable";
+            } else if (status.is_ascii_mode) {
+                result = "fcitx_rime_latin";
+            } else {
+                result = "fcitx-rime";
+            }
+        });
     }
     return result;
 }
 
-void RimeEngine::deploy() {
-    RIME_DEBUG() << "Rime Deploy";
-    instance_->inputContextManager().foreach([this](InputContext *ic) {
-        auto state = this->state(ic);
-        state->release();
+void RimeEngine::releaseAllSession(bool snapshot) {
+    instance_->inputContextManager().foreach([&](InputContext *ic) {
+        if (auto *state = this->state(ic)) {
+            if (snapshot) {
+                state->snapshot();
+            }
+            state->release();
+        }
         return true;
     });
+}
+
+void RimeEngine::deploy() {
+    RIME_DEBUG() << "Rime Deploy";
+    releaseAllSession(true);
     api_->finalize();
     rimeStart(true);
 }
 
-void RimeEngine::sync() { api_->sync_user_data(); }
+void RimeEngine::sync() {
+    RIME_DEBUG() << "Rime Sync user data";
+    releaseAllSession(true);
+    api_->sync_user_data();
+}
 
-void RimeEngine::updateSchemaMenu() {
-    if (!api_) {
+void RimeEngine::updateActionsForSchema(const std::string &schema) {
+    RimeConfig config{};
+
+    if (!api_->schema_open(schema.c_str(), &config)) {
         return;
     }
+    auto switchPaths = getListItemPath(api_, &config, "switches");
+    for (const auto &switchPath : switchPaths) {
+        auto labels = getListItemString(api_, &config, switchPath + "/states");
+        if (labels.size() <= 1) {
+            continue;
+        }
+        auto namePath = switchPath + "/name";
+        const auto *name = api_->config_get_cstring(&config, namePath.c_str());
+        if (name) {
+            if (labels.size() != 2) {
+                continue;
+            }
+            std::string optionName = name;
+            if (optionName == RIME_ASCII_MODE) {
+                // imAction_ has latin mode that does the same
+                continue;
+            }
 
+            optionActions_[schema].emplace_back(std::make_unique<ToggleAction>(
+                this, schema, optionName, labels[0], labels[1]));
+        } else {
+            auto options =
+                getListItemString(api_, &config, switchPath + "/options");
+            if (labels.size() != options.size()) {
+                continue;
+            }
+            optionActions_[schema].emplace_back(
+                std::make_unique<SelectAction>(this, schema, options, labels));
+        }
+    }
+    api_->config_close(&config);
+}
+
+void RimeEngine::updateSchemaMenu() {
+    schemas_.clear();
     schemActions_.clear();
+    optionActions_.clear();
     RimeSchemaList list;
     list.size = 0;
     if (api_->get_schema_list(&list)) {
@@ -459,12 +837,12 @@ void RimeEngine::updateSchemaMenu() {
         schemActions_.back().setShortText(_("Latin Mode"));
         schemActions_.back().connect<SimpleAction::Activated>(
             [this](InputContext *ic) {
-                auto state = ic->propertyFor(&factory_);
-                state->setLatinMode(true);
+                auto *state = this->state(ic);
+                state->toggleLatinMode();
                 imAction_->update(ic);
             });
         instance_->userInterfaceManager().registerAction(&schemActions_.back());
-        schemaMenu_.addAction(&schemActions_.back());
+        schemaMenu_.insertAction(&separatorAction_, &schemActions_.back());
         for (size_t i = 0; i < list.size; i++) {
             schemActions_.emplace_back();
             std::string schemaId = list.list[i].schema_id;
@@ -472,14 +850,39 @@ void RimeEngine::updateSchemaMenu() {
             schemaAction.setShortText(list.list[i].name);
             schemaAction.connect<SimpleAction::Activated>(
                 [this, schemaId](InputContext *ic) {
-                    auto state = ic->propertyFor(&factory_);
+                    auto *state = this->state(ic);
+                    blockNotificationFor(30000);
                     state->selectSchema(schemaId);
                     imAction_->update(ic);
                 });
             instance_->userInterfaceManager().registerAction(&schemaAction);
-            schemaMenu_.addAction(&schemaAction);
+            schemaMenu_.insertAction(&separatorAction_, &schemaAction);
+            updateActionsForSchema(schemaId);
+            schemas_.insert(schemaId);
         }
         api_->free_schema_list(&list);
+    }
+}
+
+void RimeEngine::refreshSessionPoolPolicy() {
+    auto newPolicy = getSharedStatePolicy();
+    if (sessionPool_.propertyPropagatePolicy() != newPolicy) {
+        releaseAllSession(constructed_);
+        sessionPool_.setPropertyPropagatePolicy(newPolicy);
+    }
+}
+
+PropertyPropagatePolicy RimeEngine::getSharedStatePolicy() {
+    switch (*config_.sharedStatePolicy) {
+    case SharedStatePolicy::All:
+        return PropertyPropagatePolicy::All;
+    case SharedStatePolicy::Program:
+        return PropertyPropagatePolicy::Program;
+    case SharedStatePolicy::No:
+        return PropertyPropagatePolicy::No;
+    case SharedStatePolicy::FollowGlobalConfig:
+    default:
+        return instance_->globalConfig().shareInputState();
     }
 }
 

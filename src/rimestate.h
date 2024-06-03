@@ -6,10 +6,18 @@
 #ifndef _FCITX_RIMESTATE_H_
 #define _FCITX_RIMESTATE_H_
 
-#include "rimeengine.h"
+#include "rimesession.h"
+#include <fcitx/globalconfig.h>
+#include <fcitx/inputcontextmanager.h>
 #include <fcitx/inputcontextproperty.h>
+#include <memory>
+#include <rime_api.h>
+
+#define RIME_ASCII_MODE "ascii_mode"
 
 namespace fcitx {
+
+class RimeEngine;
 
 class RimeState : public InputContextProperty {
 public:
@@ -19,23 +27,32 @@ public:
 
     void clear();
     void keyEvent(KeyEvent &event);
-    bool getStatus(RimeStatus *status);
+#ifndef FCITX_RIME_NO_SELECT_CANDIDATE
+    void selectCandidate(InputContext *inputContext, int idx, bool global);
+#endif
+    bool getStatus(const std::function<void(const RimeStatus &)> &);
     void updatePreedit(InputContext *ic, const RimeContext &context);
     void updateUI(InputContext *ic, bool keyRelease);
     void release();
     void commitPreedit(InputContext *ic);
     std::string subMode();
     std::string subModeLabel();
+    void toggleLatinMode();
     void setLatinMode(bool latin);
     void selectSchema(const std::string &schemaId);
+    RimeSessionId session(bool requestNewSession = true);
+
+    void snapshot();
+    void restore();
 
 private:
-    void createSession();
-
     std::string lastMode_;
     RimeEngine *engine_;
-    RimeSessionId session_ = 0;
     InputContext &ic_;
+    std::shared_ptr<RimeSessionHolder> session_;
+
+    std::string savedCurrentSchema_;
+    std::vector<std::string> savedOptions_;
 };
 } // namespace fcitx
 

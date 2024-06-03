@@ -6,10 +6,28 @@
 
 #include "rimestate.h"
 #include "rimecandidate.h"
+#include "rimeengine.h"
+#include <cstdint>
+#include <fcitx-utils/capabilityflags.h>
+#include <fcitx-utils/i18n.h>
+#include <fcitx-utils/key.h>
+#include <fcitx-utils/keysym.h>
+#include <fcitx-utils/stringutils.h>
+#include <fcitx-utils/textformatflags.h>
 #include <fcitx-utils/utf8.h>
 #include <fcitx/candidatelist.h>
+#include <fcitx/event.h>
 #include <fcitx/inputcontext.h>
 #include <fcitx/inputpanel.h>
+#include <fcitx/text.h>
+#include <fcitx/userinterface.h>
+#include <functional>
+#include <iterator>
+#include <memory>
+#include <optional>
+#include <rime_api.h>
+#include <string>
+#include <utility>
 
 namespace fcitx {
 
@@ -17,38 +35,44 @@ namespace {
 
 bool emptyExceptAux(const InputPanel &inputPanel) {
 
-    return inputPanel.preedit().size() == 0 &&
-           inputPanel.preedit().size() == 0 &&
-           (!inputPanel.candidateList() ||
-            inputPanel.candidateList()->size() == 0);
+    return inputPanel.preedit().empty() && inputPanel.preedit().empty() &&
+           (!inputPanel.candidateList() || inputPanel.candidateList()->empty());
 }
 } // namespace
 
 RimeState::RimeState(RimeEngine *engine, InputContext &ic)
-    : engine_(engine), ic_(ic) {
-    createSession();
-}
+    : engine_(engine), ic_(ic) {}
 
-RimeState::~RimeState() {
-    if (auto api = engine_->api()) {
-        if (session_) {
-            api->destroy_session(session_);
+RimeState::~RimeState() {}
+
+RimeSessionId RimeState::session(bool requestNewSession) {
+    if (!session_ && requestNewSession) {
+        auto [sessionHolder, isNewSession] =
+            engine_->sessionPool().requestSession(&ic_);
+        session_ = sessionHolder;
+        if (isNewSession) {
+            restore();
+        } else {
+            savedCurrentSchema_.clear();
+            savedOptions_.clear();
         }
     }
+    if (!session_) {
+        return 0;
+    }
+
+    return session_->id();
 }
 
 void RimeState::clear() {
-    if (auto api = engine_->api()) {
-        if (session_) {
-            api->clear_composition(session_);
-        }
+    if (auto session = this->session()) {
+        engine_->api()->clear_composition(session);
     }
 }
 
 std::string RimeState::subMode() {
     std::string result;
-    RIME_STRUCT(RimeStatus, status);
-    if (getStatus(&status)) {
+    getStatus([&result](const RimeStatus &status) {
         if (status.is_disabled) {
             result = "\xe2\x8c\x9b";
         } else if (status.is_ascii_mode) {
@@ -56,15 +80,13 @@ std::string RimeState::subMode() {
         } else if (status.schema_name && status.schema_name[0] != '.') {
             result = status.schema_name;
         }
-        engine_->api()->free_status(&status);
-    }
+    });
     return result;
 }
 
 std::string RimeState::subModeLabel() {
     std::string result;
-    RIME_STRUCT(RimeStatus, status);
-    if (getStatus(&status)) {
+    getStatus([&result](const RimeStatus &status) {
         if (status.is_disabled) {
             result = "";
         } else if (status.is_ascii_mode) {
@@ -78,37 +100,61 @@ std::string RimeState::subModeLabel() {
                                      utf8::nextChar(result.begin())));
             }
         }
-        engine_->api()->free_status(&status);
-    }
+    });
     return result;
 }
 
-void RimeState::setLatinMode(bool latin) {
-    auto api = engine_->api();
-    if (!api || api->is_maintenance_mode()) {
+void RimeState::toggleLatinMode() {
+    auto *api = engine_->api();
+    if (api->is_maintenance_mode()) {
         return;
     }
-    api->set_option(session_, "ascii_mode", latin);
+
+    Bool oldValue = api->get_option(session(), RIME_ASCII_MODE);
+    api->set_option(session(), RIME_ASCII_MODE, !oldValue);
+}
+
+void RimeState::setLatinMode(bool latin) {
+    auto *api = engine_->api();
+    if (api->is_maintenance_mode()) {
+        return;
+    }
+    api->set_option(session(), RIME_ASCII_MODE, latin);
 }
 
 void RimeState::selectSchema(const std::string &schema) {
-    auto api = engine_->api();
-    if (!api || api->is_maintenance_mode()) {
+    auto *api = engine_->api();
+    if (api->is_maintenance_mode()) {
         return;
     }
-    api->set_option(session_, "ascii_mode", false);
-    api->select_schema(session_, schema.data());
+    engine_->blockNotificationFor(30000);
+    api->set_option(session(), RIME_ASCII_MODE, false);
+    api->select_schema(session(), schema.data());
 }
 
 void RimeState::keyEvent(KeyEvent &event) {
-    auto api = engine_->api();
-    if (!api || api->is_maintenance_mode()) {
+    auto *ic = event.inputContext();
+    // For key-release, composeResult will always be empty string, which feed
+    // into engine directly.
+    std::string composeResult;
+    if (!event.key().states().testAny(
+            KeyStates{KeyState::Ctrl, KeyState::Super}) &&
+        !event.isRelease()) {
+        auto compose =
+            engine_->instance()->processComposeString(&ic_, event.key().sym());
+        if (!compose) {
+            event.filterAndAccept();
+            return;
+        }
+        composeResult = *compose;
+    }
+
+    auto *api = engine_->api();
+    if (api->is_maintenance_mode()) {
         return;
     }
-    if (!api->find_session(session_)) {
-        createSession();
-    }
-    if (!session_) {
+    auto session = this->session();
+    if (!session) {
         return;
     }
 
@@ -125,45 +171,85 @@ void RimeState::keyEvent(KeyEvent &event) {
         // IBUS_RELEASE_MASK
         intStates |= (1 << 30);
     }
-    auto result = api->process_key(session_, event.rawKey().sym(), intStates);
+    if (!composeResult.empty()) {
+        event.filterAndAccept();
+        auto length = utf8::lengthValidated(composeResult);
+        bool result = false;
+        if (length == 1) {
+            auto c = utf8::getChar(composeResult);
+            auto sym = Key::keySymFromUnicode(c);
+            if (sym != FcitxKey_None) {
+                result = api->process_key(session, sym, intStates);
+            }
+        }
+        if (!result) {
+            commitPreedit(ic);
+            ic->commitString(composeResult);
+            clear();
+        }
+    } else {
+        auto result =
+            api->process_key(session, event.rawKey().sym(), intStates);
+        if (result) {
+            event.filterAndAccept();
+        }
+    }
 
-    auto ic = event.inputContext();
     RIME_STRUCT(RimeCommit, commit);
-    if (api->get_commit(session_, &commit)) {
+    if (api->get_commit(session, &commit)) {
         ic->commitString(commit.text);
         api->free_commit(&commit);
+        engine_->instance()->resetCompose(ic);
     }
 
     updateUI(ic, event.isRelease());
-
-    if (result) {
-        event.filterAndAccept();
-    }
 }
 
-bool RimeState::getStatus(RimeStatus *status) {
-    auto api = engine_->api();
-    if (!api) {
+#ifndef FCITX_RIME_NO_SELECT_CANDIDATE
+void RimeState::selectCandidate(InputContext *inputContext, int idx,
+                                bool global) {
+    auto *api = engine_->api();
+    if (api->is_maintenance_mode()) {
+        return;
+    }
+    auto session = this->session();
+    if (!session) {
+        return;
+    }
+    if (global) {
+        api->select_candidate(session, idx);
+    } else {
+        api->select_candidate_on_current_page(session, idx);
+    }
+    RIME_STRUCT(RimeCommit, commit);
+    if (api->get_commit(session, &commit)) {
+        inputContext->commitString(commit.text);
+        api->free_commit(&commit);
+    }
+    updateUI(inputContext, false);
+}
+#endif
+
+bool RimeState::getStatus(
+    const std::function<void(const RimeStatus &)> &callback) {
+    auto *api = engine_->api();
+    auto session = this->session();
+    if (!session) {
         return false;
     }
-    if (!api->find_session(session_)) {
-        createSession();
-    }
-    if (!session_) {
+    RIME_STRUCT(RimeStatus, status);
+    if (!api->get_status(session, &status)) {
         return false;
     }
-    return api->get_status(session_, status);
+    callback(status);
+    api->free_status(&status);
+    return true;
 }
 
-void RimeState::updatePreedit(InputContext *ic, const RimeContext &context) {
+Text preeditFromRimeContext(const RimeContext &context, TextFormatFlags flag,
+                            TextFormatFlags highlightFlag) {
     Text preedit;
-    Text clientPreedit;
 
-    TextFormatFlags flag;
-    if (engine_->config().showPreeditInApplication.value() &&
-        ic->capabilityFlags().test(CapabilityFlag::Preedit)) {
-        flag = TextFormatFlag::Underline;
-    }
     do {
         if (context.composition.length == 0) {
             break;
@@ -181,11 +267,6 @@ void RimeState::updatePreedit(InputContext *ic, const RimeContext &context) {
             preedit.append(std::string(context.composition.preedit,
                                        context.composition.sel_start),
                            flag);
-            if (context.commit_text_preview) {
-                clientPreedit.append(std::string(context.commit_text_preview,
-                                                 context.composition.sel_start),
-                                     flag);
-            }
         }
 
         /* converting candidate */
@@ -194,13 +275,7 @@ void RimeState::updatePreedit(InputContext *ic, const RimeContext &context) {
                 std::string(
                     &context.composition.preedit[context.composition.sel_start],
                     &context.composition.preedit[context.composition.sel_end]),
-                flag | TextFormatFlag::HighLight);
-            if (context.commit_text_preview) {
-                clientPreedit.append(
-                    std::string(&context.commit_text_preview[context.composition
-                                                                 .sel_start]),
-                    flag | TextFormatFlag::HighLight);
-            }
+                flag | highlightFlag);
         }
 
         /* remaining input to convert */
@@ -215,16 +290,50 @@ void RimeState::updatePreedit(InputContext *ic, const RimeContext &context) {
         preedit.setCursor(context.composition.cursor_pos);
     } while (0);
 
-    if (engine_->config().showPreeditInApplication.value() &&
-        ic->capabilityFlags().test(CapabilityFlag::Preedit)) {
-        clientPreedit = preedit;
-    } else {
-        ic->inputPanel().setPreedit(preedit);
+    return preedit;
+}
+
+void RimeState::updatePreedit(InputContext *ic, const RimeContext &context) {
+    PreeditMode mode = ic->capabilityFlags().test(CapabilityFlag::Preedit)
+                           ? *engine_->config().preeditMode
+                           : PreeditMode::No;
+
+    switch (mode) {
+    case PreeditMode::No:
+        ic->inputPanel().setPreedit(preeditFromRimeContext(
+            context, TextFormatFlag::NoFlag, TextFormatFlag::NoFlag));
+        ic->inputPanel().setClientPreedit(Text());
+        break;
+    case PreeditMode::CommitPreview: {
+        ic->inputPanel().setPreedit(preeditFromRimeContext(
+            context, TextFormatFlag::NoFlag, TextFormatFlag::NoFlag));
+        if (context.composition.length > 0 && context.commit_text_preview) {
+            Text clientPreedit;
+            clientPreedit.append(context.commit_text_preview,
+                                 TextFormatFlag::Underline);
+            if (*engine_->config().preeditCursorPositionAtBeginning) {
+                clientPreedit.setCursor(0);
+            } else {
+                clientPreedit.setCursor(clientPreedit.textLength());
+            }
+            ic->inputPanel().setClientPreedit(clientPreedit);
+        } else {
+            ic->inputPanel().setClientPreedit(Text());
+        }
+    } break;
+    case PreeditMode::ComposingText: {
+        const TextFormatFlag highlightFlag =
+            *engine_->config().preeditCursorPositionAtBeginning
+                ? TextFormatFlag::HighLight
+                : TextFormatFlag::NoFlag;
+        Text clientPreedit = preeditFromRimeContext(
+            context, TextFormatFlag::Underline, highlightFlag);
+        if (*engine_->config().preeditCursorPositionAtBeginning) {
+            clientPreedit.setCursor(0);
+        }
+        ic->inputPanel().setClientPreedit(clientPreedit);
+    } break;
     }
-    if (engine_->config().preeditCursorPositionAtBeginning.value()) {
-        clientPreedit.setCursor(0);
-    }
-    ic->inputPanel().setClientPreedit(clientPreedit);
 }
 
 void RimeState::updateUI(InputContext *ic, bool keyRelease) {
@@ -233,21 +342,21 @@ void RimeState::updateUI(InputContext *ic, bool keyRelease) {
         inputPanel.reset();
     }
     bool oldEmptyExceptAux = emptyExceptAux(inputPanel);
-    engine_->updateAction(ic);
 
     std::string allPreedit("");
 
     do {
-        auto api = engine_->api();
-        if (!api || api->is_maintenance_mode()) {
+        auto *api = engine_->api();
+        if (api->is_maintenance_mode()) {
             return;
         }
-        if (!api->find_session(session_)) {
+        auto session = this->session();
+        if (!api->find_session(session)) {
             return;
         }
 
         RIME_STRUCT(RimeContext, context);
-        if (!api->get_context(session_, &context)) {
+        if (!api->get_context(session, &context)) {
             break;
         }
 
@@ -278,6 +387,7 @@ void RimeState::updateUI(InputContext *ic, bool keyRelease) {
         inputPanel.setAuxDown(Text());
     }
     if (newEmptyExceptAux && lastMode_ != subMode()) {
+        engine_->blockNotificationFor(30000);
         engine_->instance()->showInputMethodInformation(ic);
         ic->updateUserInterface(UserInterfaceComponent::StatusArea);
     }
@@ -299,47 +409,62 @@ void RimeState::updateUI(InputContext *ic, bool keyRelease) {
     }
 }
 
-void RimeState::release() {
-    if (auto api = engine_->api()) {
-        if (session_) {
-            api->destroy_session(session_);
-        }
-        session_ = 0;
-    }
-}
+void RimeState::release() { session_.reset(); }
 
 void RimeState::commitPreedit(InputContext *ic) {
-    if (auto api = engine_->api()) {
+    if (auto *api = engine_->api()) {
         RIME_STRUCT(RimeContext, context);
-        if (!api->get_context(session_, &context)) {
+        auto session = this->session();
+        if (!api->get_context(session, &context)) {
             return;
         }
-        if (context.commit_text_preview) {
+        if (context.composition.length > 0 && context.commit_text_preview) {
             ic->commitString(context.commit_text_preview);
         }
+        api->free_context(&context);
     }
 }
 
-void RimeState::createSession() {
-    auto api = engine_->api();
-    if (!api) {
+void RimeState::snapshot() {
+    if (!session(false)) {
         return;
     }
-    session_ = api->create_session();
-    if (!session_) {
+    getStatus([this](const RimeStatus &status) {
+        if (!status.schema_id) {
+            return;
+        }
+        savedCurrentSchema_ = status.schema_id;
+        savedOptions_.clear();
+        if (savedCurrentSchema_.empty()) {
+            return;
+        }
+        const auto &optionActions = engine_->optionActions();
+        auto iter = optionActions.find(savedCurrentSchema_);
+        if (iter == optionActions.end()) {
+            return;
+        }
+        for (const auto &option : iter->second) {
+            if (auto savedOption = option->snapshotOption(&ic_)) {
+                savedOptions_.push_back(std::move(*savedOption));
+            }
+        }
+    });
+}
+
+void RimeState::restore() {
+    if (savedCurrentSchema_.empty()) {
+        return;
+    }
+    if (!engine_->schemas().count(savedCurrentSchema_)) {
         return;
     }
 
-    if (ic_.program().empty()) {
-        return;
-    }
-
-    const auto &appOptions = engine_->appOptions();
-    if (auto iter = appOptions.find(ic_.program()); iter != appOptions.end()) {
-        RIME_DEBUG() << "Apply app options to " << ic_.program() << ": "
-                     << iter->second;
-        for (const auto &[key, value] : iter->second) {
-            api->set_option(session_, key.data(), value);
+    selectSchema(savedCurrentSchema_);
+    for (const auto &option : savedOptions_) {
+        if (stringutils::startsWith(option, "!")) {
+            engine_->api()->set_option(session(), option.c_str() + 1, false);
+        } else {
+            engine_->api()->set_option(session(), option.c_str(), true);
         }
     }
 }

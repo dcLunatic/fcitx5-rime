@@ -6,11 +6,14 @@
 #ifndef _FCITX_RIMEENGINE_H_
 #define _FCITX_RIMEENGINE_H_
 
-#include "rimeservice.h"
+#include "rimesession.h"
+#include "rimestate.h"
+#include <cstdint>
 #include <fcitx-config/configuration.h>
 #include <fcitx-config/iniparser.h>
 #include <fcitx-utils/event.h>
 #include <fcitx-utils/eventdispatcher.h>
+#include <fcitx-utils/handlertable_details.h>
 #include <fcitx-utils/i18n.h>
 #include <fcitx-utils/library.h>
 #include <fcitx-utils/log.h>
@@ -24,22 +27,46 @@
 #include <fcitx/menu.h>
 #include <memory>
 #include <rime_api.h>
+#include <string>
+#include <unordered_map>
+
+#ifndef FCITX_RIME_NO_DBUS
+#include "rimeservice.h"
+#endif
 
 namespace fcitx {
 
 class RimeState;
 
+enum class SharedStatePolicy { FollowGlobalConfig, All, Program, No };
+
+FCITX_CONFIG_ENUM_NAME_WITH_I18N(SharedStatePolicy,
+                                 N_("Follow Global Configuration"), N_("All"),
+                                 N_("Program"), N_("No"));
+
+enum class PreeditMode { No, ComposingText, CommitPreview };
+
+FCITX_CONFIG_ENUM_NAME_WITH_I18N(PreeditMode, N_("Do not show"),
+                                 N_("Composing text"), N_("Commit preview"))
+
 FCITX_CONFIGURATION(
     RimeEngineConfig,
-    Option<bool> showPreeditInApplication{this, "PreeditInApplication",
-                                          _("Show preedit within application"),
-                                          true};
     Option<bool> flypyHideInputPannel{
         this, "flypyHideInputPannel",
         _("auto hide the input pannel flypyly(by '`')"), true};
+    OptionWithAnnotation<PreeditMode, PreeditModeI18NAnnotation> preeditMode{
+        this, "PreeditMode", _("Preedit Mode"),
+        isAndroid() ? PreeditMode::No : PreeditMode::ComposingText};
+    OptionWithAnnotation<SharedStatePolicy, SharedStatePolicyI18NAnnotation>
+        sharedStatePolicy{this, "InputState", _("Shared Input State"),
+                          SharedStatePolicy::All};
+    // On Linux only cursor position is available so this pins candidate window
+    // while typing. On macOS any position within embedded preedit is available
+    // so this is unnecessary. On Android there is no candidate window yet.
     Option<bool> preeditCursorPositionAtBeginning{
         this, "PreeditCursorPositionAtBeginning",
-        _("Fix embedded preedit cursor at the beginning of the preedit"), true};
+        _("Fix embedded preedit cursor at the beginning of the preedit"),
+        !isAndroid() && !isApple()};
     Option<bool> commitWhenDeactivate{
         this, "Commit when deactivate",
         _("Commit current text when deactivating"), true};
@@ -64,6 +91,12 @@ FCITX_CONFIGURATION(
 #endif
 );
 
+class RimeOptionAction : public Action {
+public:
+    // This is used to save the option when we need to release the session.
+    virtual std::optional<std::string> snapshotOption(InputContext *ic) = 0;
+};
+
 class RimeEngine final : public InputMethodEngineV2 {
 public:
     RimeEngine(Instance *instance);
@@ -80,24 +113,22 @@ public:
     void save() override;
     auto &factory() { return factory_; }
 
-    void updateAction(InputContext *inputContext) {
-        imAction_->update(inputContext);
-    }
-
     const Configuration *getConfig() const override { return &config_; }
     void setConfig(const RawConfig &config) override {
         config_.load(config, true);
         safeSaveAsIni(config_, "conf/rime.conf");
         updateConfig();
     }
-    void setSubConfig(const std::string &path, const RawConfig &) override;
+    void setSubConfig(const std::string &path,
+                      const RawConfig & /*unused*/) override;
     void updateConfig();
 
-    std::string subMode(const InputMethodEntry &, InputContext &) override;
-    std::string subModeIconImpl(const InputMethodEntry &,
-                                InputContext &) override;
-    std::string subModeLabelImpl(const InputMethodEntry &,
-                                 InputContext &) override;
+    std::string subMode(const InputMethodEntry & /*entry*/,
+                        InputContext & /*inputContext*/) override;
+    std::string subModeIconImpl(const InputMethodEntry & /*unused*/,
+                                InputContext & /*unused*/) override;
+    std::string subModeLabelImpl(const InputMethodEntry & /*unused*/,
+                                 InputContext & /*unused*/) override;
     const RimeEngineConfig &config() const { return config_; }
 
     rime_api_t *api() { return api_; }
@@ -106,28 +137,49 @@ public:
     void rimeStart(bool fullcheck);
 
     RimeState *state(InputContext *ic);
+    RimeSessionPool &sessionPool() { return sessionPool_; }
 
+#ifndef FCITX_RIME_NO_DBUS
     FCITX_ADDON_DEPENDENCY_LOADER(dbus, instance_->addonManager());
+#endif
+
+    void blockNotificationFor(uint64_t usec);
+    const auto &schemas() const { return schemas_; }
+    const auto &optionActions() const { return optionActions_; };
 
 private:
-    static void rimeNotificationHandler(void *context_object,
-                                        RimeSessionId session_id,
-                                        const char *message_type,
-                                        const char *message_value);
+    static void rimeNotificationHandler(void *context, RimeSessionId session,
+                                        const char *messageTypee,
+                                        const char *messageValue);
 
     void deploy();
     void sync();
     void updateSchemaMenu();
-    void notify(const std::string &type, const std::string &value);
+    void updateActionsForSchema(const std::string &schema);
+    void notify(RimeSessionId session, const std::string &type,
+                const std::string &value);
+    void releaseAllSession(bool snapshot = false);
+    void updateAppOptions();
+    void refreshStatusArea(InputContext &ic);
+    void refreshStatusArea(RimeSessionId session);
+    void updateStatusArea(RimeSessionId session);
+    void refreshSessionPoolPolicy();
+    PropertyPropagatePolicy getSharedStatePolicy();
 
+    bool constructed_ = false;
+    std::string sharedDataDir_;
     IconTheme theme_;
     Instance *instance_;
     EventDispatcher eventDispatcher_;
     rime_api_t *api_;
-    bool firstRun_ = true;
+    static bool firstRun_;
+    uint64_t blockNotificationBefore_ = 0;
+    uint64_t lastKeyEventTime_ = 0;
     FactoryFor<RimeState> factory_;
+    bool needRefreshAppOption_ = false;
 
     std::unique_ptr<Action> imAction_;
+    SimpleAction separatorAction_;
     SimpleAction deployAction_;
     SimpleAction syncAction_;
 
@@ -137,14 +189,21 @@ private:
 
     FCITX_ADDON_DEPENDENCY_LOADER(notifications, instance_->addonManager());
 
+    std::unordered_set<std::string> schemas_;
     std::list<SimpleAction> schemActions_;
+    std::unordered_map<std::string,
+                       std::list<std::unique_ptr<RimeOptionAction>>>
+        optionActions_;
     Menu schemaMenu_;
 #ifdef FCITX_RIME_LOAD_PLUGIN
     std::unordered_map<std::string, Library> pluginPool_;
 #endif
-    std::unique_ptr<EventSourceTime> timeEvent_;
+    std::unique_ptr<HandlerTableEntry<EventHandler>> globalConfigReloadHandle_;
 
+#ifndef FCITX_RIME_NO_DBUS
     RimeService service_{this};
+#endif
+    RimeSessionPool sessionPool_;
 };
 
 class RimeEngineFactory : public AddonFactory {

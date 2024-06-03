@@ -1,6 +1,6 @@
-cmake_minimum_required(VERSION 3.4.0)
+cmake_minimum_required(VERSION 3.6.0)
 
-project(fcitx5-rime VERSION 5.0.14)
+project(fcitx5-rime VERSION 5.1.8)
 
 find_package(ECM 1.0.0 REQUIRED)
 set(CMAKE_MODULE_PATH ${ECM_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake" ${CMAKE_MODULE_PATH})
@@ -10,12 +10,23 @@ include(ECMSetupVersion)
 include(ECMUninstallTarget)
 
 find_package(Gettext REQUIRED)
-find_package(Fcitx5Core 5.0.6 REQUIRED)
-find_package(Fcitx5Module REQUIRED COMPONENTS Notifications DBus)
+find_package(Fcitx5Core 5.1.9 REQUIRED)
+find_package(Fcitx5Module REQUIRED COMPONENTS Notifications)
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(Rime REQUIRED IMPORTED_TARGET "rime>=1.0.0")
+
+if (NOT DEFINED RIME_TARGET)
+    pkg_check_modules(Rime REQUIRED IMPORTED_TARGET "rime>=1.0.0")
+    set(RIME_TARGET PkgConfig::Rime)
+endif()
+
 if ("${Rime_VERSION}" VERSION_LESS "1.7.0")
     add_definitions(-DFCITX_RIME_LOAD_PLUGIN)
+endif()
+if ("${Rime_VERSION}" VERSION_LESS "1.6.0")
+    add_definitions(-DFCITX_RIME_NO_LOG_LEVEL)
+endif()
+if ("${Rime_VERSION}" VERSION_LESS "1.3.0")
+    add_definitions(-DFCITX_RIME_NO_SELECT_CANDIDATE)
 endif()
 
 if(NOT DEFINED RIME_DATA_DIR)
