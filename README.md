@@ -12,10 +12,10 @@
 ![](assets/1.gif)
 
 ## 快速开始
-> 要求对应的fcitx5版本为5.1.8
+> 要求对应的fcitx5-rime版本为5.1.6-1,更新的版本也可以尝试
 ```sh
 git clone https://github.com/dcLunatic/fcitx5-rime.git
-# Wait for an update to arrive
+sudo sh quickStart/quickInstall.sh
 ```
 
 ## 说明
