@@ -20,6 +20,8 @@ echo ">> replace file..."
 cp ./src/$sofile /usr/lib/$targetProgram/$sofile
 
 echo ">> restart $targetProgram"
+# prevent replacement failure
+pkill fcitx5
 $targetProgram -r -d > /dev/null 2>&1
 
 echo "Done."
